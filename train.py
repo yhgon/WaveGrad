@@ -218,9 +218,90 @@ def run(config, args):
     
     # config distribute
 
+
+    
+    #############################################
+    
+    # model
+    model = WaveGrad(config).cuda()
+    show_message(f'Number of parameters: {model.nparams}', verbose=args.verbose)    
+    
+    # optimizer amp config
+    
+    show_message('Initializing optimizer, scheduler and losses...', verbose=args.verbose)
+    kw = dict(lr=args.learning_rate, betas=(0.9, 0.98), eps=1e-9,
+              weight_decay=args.weight_decay)
+    
+    if args.optimizer == 'adam':
+        optimizer = FusedAdam(model.parameters(), **kw)
+    elif args.optimizer == 'lamb':
+        optimizer = FusedLAMB(model.parameters(), **kw)
+    else:
+        raise ValueError
+        
+    if args.amp:
+        model, optimizer = amp.initialize(model, optimizer, opt_level="O1")
+
+    if args.ema_decay > 0:
+        ema_model = copy.deepcopy(model)
+    else:
+        ema_model = None
+
+    if distributed_run:
+        model = DistributedDataParallel(model, device_ids=[args.local_rank],
+                                        output_device=args.local_rank,
+                                        find_unused_parameters=True)
+
+    start_epoch = [1]
+    start_iter  = [0]
+    
+    ################
+    load checkpoint 
+    
+    assert args.checkpoint_path is None or args.resume is False, (
+        "Specify a single checkpoint source")
+    if args.checkpoint_path is not None:
+        ch_fpath = args.checkpoint_path
+    elif args.resume:
+        ch_fpath = last_checkpoint(args.output)
+    else:
+        ch_fpath = None
+
+    if ch_fpath is not None:
+        load_checkpoint(local_rank, model, ema_model, optimizer, start_epoch,
+                        start_iter, model_config, args.amp, ch_fpath,
+                        world_size)
+
+    start_epoch = start_epoch[0]
+    total_iter = start_iter[0]
+    
+    
     
     # dataloader
-
+    
+    ##########################################################    
+    show_message('Initializing data loaders...', verbose=args.verbose)
+    
+    train_dataset = AudioDataset(config, training=True)
+   
+    # distributed sampler 
+    if distributed_run:
+        train_sampler, shuffle = DistributedSampler(trainset), False
+    else:
+        train_sampler, shuffle = None, True
+        
+    train_dataloader = DataLoader(train_dataset, num_workers=1, shuffle=shuffle,
+                                  sampler=train_sampler, batch_size=args.batch_size,
+                                  pin_memory=False, drop_last=True )
+    
+    # ground truth samples 
+    test_dataset = AudioDataset(config, training=False)
+    test_dataloader = DataLoader(test_dataset, batch_size=1)
+    test_batch = test_dataset.sample_test_batch(
+        config.training_config.n_samples_to_test
+    )
+    
+    # Log ground truth test batch    
     mel_fn = MelSpectrogramFixed(
         sample_rate=config.data_config.sample_rate,
         n_fft=config.data_config.n_fft,
@@ -232,57 +313,123 @@ def run(config, args):
         window_fn=torch.hann_window
     ).cuda()    
     
-    show_message('Initializing data loaders...', verbose=args.verbose)
-    train_dataset = AudioDataset(config, training=True)
-    train_dataloader = DataLoader(
-        train_dataset, batch_size=config.training_config.batch_size, drop_last=True
-    )
-    test_dataset = AudioDataset(config, training=False)
-    test_dataloader = DataLoader(test_dataset, batch_size=1)
-    test_batch = test_dataset.sample_test_batch(
-        config.training_config.n_samples_to_test
-    )
+    audios = {
+        f'audio_{index}/gt': audio
+        for index, audio in enumerate(test_batch)
+    }
+    logger.log_audios(0, audios)
+    specs = {
+        f'mel_{index}/gt': mel_fn(audio.cuda()).cpu().squeeze()
+        for index, audio in enumerate(test_batch)
+    }
+    logger.log_specs(0, specs)
+    
+   
     
     
-    # sampler 
-    if distributed_run:
-        train_sampler, shuffle = DistributedSampler(trainset), False
-    else:
-        train_sampler, shuffle = None, True
-        
-    
-    # model
-    model = WaveGrad(config).cuda()
-    show_message(f'Number of parameters: {model.nparams}', verbose=args.verbose)    
-    
-    # amp config    
-    # optimizer
-    
-    show_message('Initializing optimizer, scheduler and losses...', verbose=args.verbose)
-    optimizer = torch.optim.Adam(params=model.parameters(), lr=config.training_config.lr)
-    scheduler = torch.optim.lr_scheduler.StepLR(
-        optimizer,
-        step_size=config.training_config.scheduler_step_size,
-        gamma=config.training_config.scheduler_gamma
-    )
 
-    
-    
-    
-    #load checkpoint 
     
     ####### loop start
     #epoch
     
-    #iter train
-    # print loss
-    #iter val 
-    #print loss
-    #save checkpoint
+    model.train()
+    val_loss = 0.0
+    torch.cuda.synchronize()    
     
-    
-    
+    for epoch in range(start_epoch, args.epochs + 1):
+        epoch_start_time = time.time()
+        epoch_loss = 0.0
+        
+        if distributed_run:
+            train_loader.sampler.set_epoch(epoch)        
+        
+        accumulated_steps = 0
+        iter_loss = 0    
+        epoch_iter = 0
+        num_iters = len(train_loader) // args.gradient_accumulation_steps
+        
+        model.set_new_noise_schedule(
+            init=torch.linspace,
+            init_kwargs={
+                'steps': config.training_config.training_noise_schedule.n_iter,
+                'start': config.training_config.training_noise_schedule.betas_range[0],
+                'end': config.training_config.training_noise_schedule.betas_range[1]
+            }
+        )
 
+        
+        for batch in train_loader:
+            
+            model.zero_grad()                
+            batch = batch.cuda()
+            mels = mel_fn(batch)           
+            
+            # Training step
+            model.zero_grad()
+            loss = model.compute_loss(mels, batch)
+            
+            if args.amp:
+                with amp.scale_loss(loss, optimizer) as scaled_loss:
+                    scaled_loss.backward()
+            else:
+                loss.backward()
+                
+            if distributed_run:
+                reduced_loss = reduce_tensor(loss.data, world_size).item()
+            else:
+                reduced_loss = loss.item()
+            if np.isnan(reduced_loss):
+                raise Exception("loss is NaN") 
+                
+            iter_loss += reduced_loss
+            
+            if args.amp:
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    amp.master_params(optimizer), args.grad_clip_thresh)
+            else:
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), args.grad_clip_thresh)
+
+            optimizer.step()
+
+            iter_stop_time = time.time()
+            iter_time = iter_stop_time - iter_start_time
+            epoch_loss += iter_loss
+            iter_loss = 0
+                
+            loss_stats = {
+                'iter_loss': iter_loss.item(),
+                'grad_norm': grad_norm.item()
+            }
+            logger.log_training(iteration, loss_stats, verbose=args.verbose)
+
+            iteration += 1
+        # Finished epoch
+        epoch_stop_time = time.time()
+        epoch_time = epoch_stop_time - epoch_start_time
+        
+        # Test step
+        if epoch % config.training_config.test_interval == 0:
+            model.set_new_noise_schedule(
+                init=torch.linspace,
+                init_kwargs={
+                    'steps': config.training_config.test_noise_schedule.n_iter,
+                    'start': config.training_config.test_noise_schedule.betas_range[0],
+                    'end': config.training_config.test_noise_schedule.betas_range[1]
+                }
+                    
+                    
+
+    
+    
+        #save checkpoint 
+        if (epoch > 0 and args.epochs_per_checkpoint > 0 and
+            (epoch % args.epochs_per_checkpoint == 0) and local_rank == 0):
+
+            checkpoint_path = os.path.join(
+                args.output, f"FastPitch_checkpoint_{epoch}.pt")
+            save_checkpoint(local_rank, model, ema_model, optimizer, epoch,
+                            total_iter, model_config, args.amp, checkpoint_path)
         
     
 if __name__ == '__main__':
