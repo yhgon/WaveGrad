@@ -35,30 +35,33 @@ WaveGrad is a conditional model for waveform generation through estimating gradi
 
 1. Clone this repo:
 
+
 ```bash
 git clone https://github.com/yhgon/WaveGrad.git
 cd WaveGrad
 ```
 
 2. Install requirements `pip install -r requirements.txt`
+use below docker images `docker pull hryu/pytorch:20.08-3 ` which based on nvcr.io/nvidia/pytorch:20.08-py3 with torchaudio,matplotlib=3.2.2 and sox.
+
+`Dockerfile.waveglow`
+
+
 
 ## download ljspeech dataset and extract
-```
-wget -N  -O gfile.py https://raw.githubusercontent.com/yhgon/colab_utils/master/gfile.py
-python gfile.py -u 'https://drive.google.com/file/d/1jmJnOaUUXWj4m-k1fYtLhhLXtrum7FTw/view?usp=sharing' -f 'data.tar.gz'
-tar -xzf data.tar.gz
-
-```
-
-- generate train and test filelist 
-
-train dataset 13069
-test dataset 32
+ 
+download LJSpeech and generate train and test filelist 
 
 ```
 ls LJSpeech-1.1/wavs/*.wav | tail -n+32 > train_files.txt
 ls LJSpeech-1.1/wavs/*.wav | head -n32 > test_files.txt
+```
 
+- train dataset 13069
+- test dataset 32
+
+copy file to right directory. 
+```
 cp -rf train_files.txt  WaveGrad/filelists/train.txt
 cp -rf test_files.txt   WaveGrad/filelists/test.txt
 ```
@@ -70,6 +73,17 @@ cp -rf test_files.txt   WaveGrad/filelists/test.txt
 2. Setup a configuration in `configs` folder.
 
 3. Change config path in `train.sh` and run the script by `sh train.sh`.
+
+
+tips for batch_size 
+|  GPU  | nGPU |precision| batch| iters| s/iter| s/epoch|  MiB |   params |
+|:------|-----:|--------:|-----:|-----:|------:|-------:|-----:|---------:|
+|  V100 |   1  |  FP32   | 48   |  272 |  1.71 |    190 |  8936|  15810401|
+|  V100 |   1  |  FP32   | 128  |  102 |  1.79 |    183 | 21578|  15810401|
+|  V100 |   1  |  FP32   | 198  |   66 |  2.74 |    182 | 31434|  15810401|
+|  V100 |   1  |  FP32   | 256  |    - |     - |      - |   OOM|  15810401|
+
+
 
 4. To track training process run tensorboard by `tensorboard --logdir=logs/YOUR_LOG_FOLDER`.
 
