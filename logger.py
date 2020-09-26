@@ -28,13 +28,13 @@ class Logger(SummaryWriter):
         for key, value in loss_stats.items():
             self.add_scalar(key, value, iteration)
 
-    def log_training(self, iteration, stats, verbose=True):
+    def log_training(self,epoch, iteration, iter_size, stats, dur_iter, epoch_iter, verbose=True):
         stats = {f'training/{key}': value for key, value in stats.items()}
+        loss_value = [value for value in stats.values()]
         self._log_losses(iteration, loss_stats=stats)
-        show_message(
-            f'Iteration: {iteration} | Losses: {[value for value in stats.values()]}',
-            verbose=verbose
-        )
+        show_message("epoc {:4d}- iter {:>3d}/{:3d} | {:3.2f}s/iter {:d}s/epoch | losses {:>12.6f} {:>12.6f} ".format(
+                epoch, iteration,iter_size, dur_iter, epoch_iter, loss_value[0], loss_value[1]  ), verbose=verbose
+                 )
 
     def log_test(self, epoch, stats, verbose=True):
         stats = {f'test/{key}': value for key, value in stats.items()}
