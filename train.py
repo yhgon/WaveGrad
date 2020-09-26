@@ -40,12 +40,12 @@ def parse_args(parser):
     parser.add_argument('-o', '--output',       type=str, required=True,  help='Directory to save checkpoints')
     parser.add_argument('-d', '--dataset-path', type=str, default='./',  help='Path to dataset')
     parser.add_argument('--log-file',           type=str, default=None,  help='Path to a DLLogger log file')
-
+    
     training = parser.add_argument_group('training setup')
-    training.add_argument('--epochs',                type=int,         required=True,   help='Number of total epochs to run')
-    training.add_argument('--epochs-per-checkpoint', type=int,         default=50,  help='Number of epochs per checkpoint')
-    training.add_argument('--checkpoint-path',       type=str,         default=None, help='Checkpoint path to resume training')
-    training.add_argument('--resume',                                  action='store_true',  help='Resume training from the last available checkpoint')
+    training.add_argument('--epochs',        type=int, required=True,   help='Number of total epochs to run')
+    training.add_argument('--epochs-per-checkpoint', type=int, required=True,         help='Number of epochs per checkpoint')
+    training.add_argument('--checkpoint-path', type=str, default=None, help='Checkpoint path to resume training')
+    training.add_argument('--resume',                  action='store_true',  help='Resume training from the last available checkpoint')
     training.add_argument('--seed',                  type=int,         default=1234,  help='Seed for PyTorch random number generators')
     training.add_argument('--amp',                                     action='store_true', help='Enable AMP')
     training.add_argument('--cuda',                                    action='store_true',   help='Run on GPU using CUDA')
@@ -115,24 +115,22 @@ def last_checkpoint(output):
         return None
 
 
-def save_checkpoint(local_rank, model, ema_model, optimizer, epoch, total_iter,
+def save_checkpoint(local_rank, model, optimizer, epoch, total_iter,
                     config, amp_run, filepath):
     if local_rank != 0:
         return
     print(f"Saving model and optimizer state at epoch {epoch} to {filepath}")
-    ema_dict = None if ema_model is None else ema_model.state_dict()
     checkpoint = {'epoch': epoch,
                   'iteration': total_iter,
                   'config': config,
                   'state_dict': model.state_dict(),
-                  'ema_state_dict': ema_dict,
                   'optimizer': optimizer.state_dict()}
     if amp_run:
         checkpoint['amp'] = amp.state_dict()
     torch.save(checkpoint, filepath)
 
 
-def load_checkpoint(local_rank, model, ema_model, optimizer, epoch, total_iter,
+def load_checkpoint(local_rank, model, optimizer, epoch, total_iter,
                     config, amp_run, filepath, world_size):
     if local_rank == 0:
         print(f'Loading model and optimizer state from {filepath}')
@@ -141,16 +139,28 @@ def load_checkpoint(local_rank, model, ema_model, optimizer, epoch, total_iter,
     total_iter[0] = checkpoint['iteration']
     config = checkpoint['config']
 
-    sd = {k.replace('module.', ''): v
-          for k, v in checkpoint['state_dict'].items()}
-    getattr(model, 'module', model).load_state_dict(sd)
+    valid_incompatible_unexp_keys = [
+        'betas',
+        'alphas',
+        'alphas_cumprod',
+        'alphas_cumprod_prev',
+        'sqrt_alphas_cumprod',
+        'sqrt_recip_alphas_cumprod',
+        'sqrt_recipm1_alphas_cumprod',
+        'posterior_log_variance_clipped',
+        'posterior_mean_coef1',
+        'posterior_mean_coef2'     ]
+    checkpoint['state_dict'] = {
+        key: value for key, value in checkpoint['state_dict'].items() \
+            if key not in valid_incompatible_unexp_keys
+    }
+    model.load_state_dict(checkpoint['state_dict'], strict=False)
+
     optimizer.load_state_dict(checkpoint['optimizer'])
 
     if amp_run:
         amp.load_state_dict(checkpoint['amp'])
 
-    if ema_model is not None:
-        ema_model.load_state_dict(checkpoint['ema_state_dict'])
         
 
 
@@ -224,15 +234,20 @@ def run(config, args):
     torch.manual_seed(args.seed + local_rank)
     np.random.seed(args.seed + local_rank)
 
-    if local_rank == 0:
-        if not os.path.exists(args.output):
-            os.makedirs(args.output)
+#    if local_rank == 0:
+#        if not os.path.exists(args.output):
+#            os.makedirs(args.output)
  
     torch.backends.cudnn.enabled = True
     torch.backends.cudnn.benchmark = False
+
+    if distributed_run:
+        init_distributed(args,world_size, local_rank)
+
+    device = torch.device('cuda' if args.cuda else 'cpu')
     
-    
-    if local_rank == 0:
+
+    if local_rank ==0 :    
         print("start training")
         print("args", args)
         print("config", config)
@@ -243,8 +258,11 @@ def run(config, args):
     if local_rank == 0:
         print("load model")
     model = WaveGrad(config).cuda()
-    if local_rank == 0:
-        print(model) 
+
+    my_schedule = model.set_new_noise_schedule
+    compute_loss = model.compute_loss
+   # if local_rank == 0:
+   #     print(model) 
     
     # optimizer amp config
     if local_rank == 0:    
@@ -256,6 +274,8 @@ def run(config, args):
         optimizer = FusedAdam(model.parameters(), **kw)
     elif args.optimizer == 'lamb':
         optimizer = FusedLAMB(model.parameters(), **kw)
+    elif args.optimizer == 'pytorch':
+        optimizer = torch.optim.Adam(model.parameters(), **kw)
     else:
         raise ValueError
         
@@ -272,21 +292,10 @@ def run(config, args):
     
     ################
     #load checkpoint 
-    if local_rank == 0:
-        print("checkpoint load if needed")
-    
-    assert args.checkpoint_path is None or args.resume is False, (
-        "Specify a single checkpoint source")
     if args.checkpoint_path is not None:
         ch_fpath = args.checkpoint_path
-    elif args.resume:
-        ch_fpath = last_checkpoint(args.output)
-    else:
-        ch_fpath = None
-
-    if ch_fpath is not None:
-        load_checkpoint(local_rank, model, ema_model, optimizer, start_epoch,
-                        start_iter, model_config, args.amp, ch_fpath,
+        load_checkpoint(local_rank, model, optimizer, start_epoch,
+                        start_iter, config, args.amp, ch_fpath,
                         world_size)
 
     start_epoch = start_epoch[0]
@@ -298,21 +307,27 @@ def run(config, args):
     ##########################################################    
     if local_rank == 0:    
         print("load dataset") 
+
+    if local_rank ==0:
+        print("prepare train dataset")
     train_dataset = AudioDataset(config, training=True)
    
     # distributed sampler 
     if distributed_run:
-        train_sampler, shuffle = DistributedSampler(trainset), False
+        train_sampler, shuffle = DistributedSampler(train_dataset), False
     else:
         train_sampler, shuffle = None, True
         
-    train_dataloader = DataLoader(train_dataset, num_workers=1, shuffle=shuffle,
+    train_loader = DataLoader(train_dataset, num_workers=1, shuffle=shuffle,
                                   sampler=train_sampler, batch_size=args.batch_size,
                                   pin_memory=False, drop_last=True )
     
     # ground truth samples 
+
+    if local_rank==0:
+        print("prepare test_dataset")
     test_dataset = AudioDataset(config, training=False)
-    test_dataloader = DataLoader(test_dataset, batch_size=1)
+    test_loader = DataLoader(test_dataset, batch_size=1)
     test_batch = test_dataset.sample_test_batch(
         config.training_config.n_samples_to_test
     )
@@ -367,7 +382,7 @@ def run(config, args):
         iteration = 0
         num_iters = len(train_loader) // args.gradient_accumulation_steps
         
-        model.set_new_noise_schedule(
+        my_schedule(
             init=torch.linspace,
             init_kwargs={
                 'steps': config.training_config.training_noise_schedule.n_iter,
@@ -386,7 +401,7 @@ def run(config, args):
             
             # Training step
             model.zero_grad()
-            loss = model.compute_loss(mels, batch)
+            loss = compute_loss(mels, batch)
             
             if args.amp:
                 with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -415,26 +430,24 @@ def run(config, args):
             toc_iter = time.time()
             dur_iter = toc_iter - tic_iter
             epoch_loss += iter_loss
-            iter_loss = 0
-                
-            loss_stats = {
-                'iter_loss': iter_loss.item(),
-                'grad_norm': grad_norm.item()
-            }
+            iter_size = len(train_loader)   
+            dur_epoch_est = iter_size * dur_iter
             if local_rank == 0:
-                print("\nepoch {:4d} | iter {:>12d}  {:>3d}/{:3d} | {:3.2f}s/iter est {:d}s/epoch | losses {:>12.6f} {:>12.6f} ".format(
-                        epoch, iteration, i, iter_size, dur_iter, epoch_iter, iter_loss.item(), grad_norm.item()  ) ,end='' )
+                print("\nepoch {:4d} | iter {:>12d}  {:>3d}/{:3d} | {:3.2f}s/iter est {:4.2f}s/epoch | losses {:>12.6f} {:>12.6f} ".format(
+                               epoch, iteration,      i, iter_size, dur_iter,      dur_epoch_est, iter_loss, grad_norm  ) ,end='' )
+            iter_loss =0
             iteration += 1
+
         # Finished epoch
         toc_epoch = time.time()
         dur_epoch = toc_epoch - tic_epoch
         if local_rank == 0:
-            print("  {:4.2f}s/epoch  ".format(iter_size, dur_epoch  )  )        
+            print("for {}item,   {:4.2f}s/epoch  ".format(iter_size, dur_epoch  )  )        
         
         
         # Test step
         if epoch % config.training_config.test_interval == 0:
-            model.set_new_noise_schedule(
+            my_schedule(
                 init=torch.linspace,
                 init_kwargs={
                     'steps': config.training_config.test_noise_schedule.n_iter,
@@ -443,19 +456,10 @@ def run(config, args):
                 } )
                     
                     
+        if (epoch % args.epochs_per_checkpoint ==0 ) : 
+            ch_path = os.path.join(args.output, "WaveGrad_ch_{:d}.pt".format(epoch) )
+            save_checkpoint(local_rank, model, optimizer, epoch,iteration, config, args.amp, ch_path)
 
-    
-    
-        #save checkpoint 
-        if (epoch > 0 and args.epochs_per_checkpoint > 0 and 
-            (epoch % args.epochs_per_checkpoint == 0) and local_rank == 0):
-
-            checkpoint_path = os.path.join(
-                args.output, f"FastPitch_checkpoint_{epoch}.pt")
-            save_checkpoint(local_rank, model, ema_model, optimizer, epoch,
-                            total_iter, model_config, args.amp, checkpoint_path)
-            if local_rank == 0:
-                print("checkpoint saved")
         
     
 if __name__ == '__main__':
@@ -470,6 +474,5 @@ if __name__ == '__main__':
         config = ConfigWrapper(**json.load(f))
                 
 
-    
     
     run(config, args)
