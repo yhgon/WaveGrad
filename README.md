@@ -33,7 +33,7 @@ WaveGrad is a conditional model for waveform generation through estimating gradi
 
 ## Setup
 
-1. Clone this repo:
+### 1. Clone this repo:
 
 
 ```bash
@@ -41,14 +41,26 @@ git clone https://github.com/yhgon/WaveGrad.git
 cd WaveGrad
 ```
 
-2. Install requirements `pip install -r requirements.txt`
-use below docker images `docker pull hryu/pytorch:20.08-3 ` which based on nvcr.io/nvidia/pytorch:20.08-py3 with torchaudio,matplotlib=3.2.2 and sox.
+### 2. Install requirements  
+use custom build docker images `docker pull hryu/pytorch:20.08-3 ` which based on nvcr.io/nvidia/pytorch:20.08-py3 with torchaudio,matplotlib=3.2.2 and sox.
 
-`Dockerfile.waveglow`
+exact dockerfile for `Dockerfile.waveglow` is below 
+```
+FROM nvcr.io/nvidia/pytorch:20.08-py3 
+RUN apt-get update
+RUN apt-get install -y sox libsox-dev libsox-fmt-all
+WORKDIR /opt
+RUN git clone https://github.com/pytorch/audio.git
+WORKDIR audio
+RUN python setup.py install
+RUN pip install matplotlib==3.2.2
+
+
+```
 
 
 
-## download ljspeech dataset and extract
+### 3. download ljspeech dataset and extract
  
 download LJSpeech and generate train and test filelist 
 
