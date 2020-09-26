@@ -3,6 +3,8 @@
 # WaveGrad
 Implementation (PyTorch) of Google Brain's WaveGrad vocoder (paper: https://arxiv.org/pdf/2009.00713.pdf).
 
+modified by Hyungon Ryu 
+
 ## **Status** (STABLE)
 
 * Model training is stable and supports multi-iteration inference (**6 iterations also work perfect and produce high-fidelity samples**).
@@ -34,18 +36,43 @@ WaveGrad is a conditional model for waveform generation through estimating gradi
 1. Clone this repo:
 
 ```bash
-git clone https://github.com/ivanvovk/WaveGrad.git
+git clone https://github.com/yhgon/WaveGrad.git
 cd WaveGrad
 ```
 
 2. Install requirements `pip install -r requirements.txt`
 
+## download ljspeech dataset and extract
+```
+wget -N  -O gfile.py https://raw.githubusercontent.com/yhgon/colab_utils/master/gfile.py
+python gfile.py -u 'https://drive.google.com/file/d/1jmJnOaUUXWj4m-k1fYtLhhLXtrum7FTw/view?usp=sharing' -f 'data.tar.gz'
+tar -xzf data.tar.gz
+
+```
+
+- generate train and test filelist 
+
+train dataset 13069
+test dataset 32
+
+```
+ls LJSpeech-1.1/wavs/*.wav | tail -n+32 > train_files.txt
+ls LJSpeech-1.1/wavs/*.wav | head -n32 > test_files.txt
+
+cp -rf train_files.txt  WaveGrad/filelists/train.txt
+cp -rf test_files.txt   WaveGrad/filelists/test.txt
+```
+
 ## Train your own model
 
 1. Make filelists of your audio data like ones included into `filelists` folder.
+
 2. Setup a configuration in `configs` folder.
+
 3. Change config path in `train.sh` and run the script by `sh train.sh`.
+
 4. To track training process run tensorboard by `tensorboard --logdir=logs/YOUR_LOG_FOLDER`.
+
 5. Once model is trained, grid search the best schedule for a needed number of iterations in [`notebooks/inference.ipynb`](notebooks/inference.ipynb).
 
 ## Inference, generated audios and pretrained checkpoints
