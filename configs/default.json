@@ -20,7 +20,7 @@
         "sample_rate": 22050,
         "n_fft": 1024,
         "win_length": 1024,
-        "hop_length": 256,
+        "hop_length": 300,
         "f_min": 0,
         "f_max": 8000,
         "n_mels": 80
