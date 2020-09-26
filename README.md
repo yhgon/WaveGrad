@@ -42,7 +42,7 @@ cd WaveGrad
 ```
 
 ### 2. Install requirements  
-use custom build docker images `docker pull hryu/pytorch:20.08-3 ` which based on `nvcr.io/nvidia/pytorch:20.08-py3` with `torchaudio`, `matplotlib=3.2.2` and `sox`.
+use custom build docker images `docker pull hryu/pytorch:20.08-3 ` which based on `nvcr.io/nvidia/pytorch:20.08-py3` with `torchaudio` source build, `matplotlib=3.2.2` , `apex` source build and `sox`.
 
 exact dockerfile for `Dockerfile.wavegrad` is below 
 ```
@@ -54,6 +54,10 @@ RUN git clone https://github.com/pytorch/audio.git
 WORKDIR audio
 RUN python setup.py install
 RUN pip install matplotlib==3.2.2
+WORDIR /opt
+RUN git clone https://github.com/NVIDIA/apex
+WORKDIR /opt/apex
+RUN pip install -v --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" ./
 
 ```
 
