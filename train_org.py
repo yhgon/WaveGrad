@@ -85,7 +85,7 @@ def run(config, args):
                     'end': config.training_config.training_noise_schedule.betas_range[1]
                 }
             )
-            for batch in train_dataloader:
+            for i,batch in enumerate(train_dataloader):
                 tic_iter = time.time()
                 batch = batch.cuda()
                 mels = mel_fn(batch)
@@ -107,7 +107,7 @@ def run(config, args):
                     'grad_norm': grad_norm.item()
                 }
                 iter_size = len(train_dataloader)
-                logger.log_training(epoch, iteration,iter_size, loss_stats, dur_iter, int(dur_iter*iter_size),  verbose=args.verbose)
+                logger.log_training(epoch, iteration,i,iter_size, loss_stats, dur_iter, int(dur_iter*iter_size),  verbose=args.verbose)
                 
                 iteration += 1
 
