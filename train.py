@@ -6,6 +6,7 @@ import os
 import re
 import time
 from datetime import datetime
+import numpy as np 
 
 from collections import defaultdict, OrderedDict
 import time
@@ -23,7 +24,7 @@ from torch.utils.data.distributed import DistributedSampler
 from apex import amp
 from apex.optimizers import FusedAdam, FusedLAMB
 
-from logger import Logger
+#from logger import Logger
 from model import WaveGrad
 from data import AudioDataset, MelSpectrogramFixed
 from benchmark import compute_rtf
@@ -34,6 +35,8 @@ def parse_args(parser):
     """
     Parse commandline arguments.
     """
+    parser.add_argument('-c', '--config',       type=str, required=True, help='configure file')
+    parser.add_argument('-v', '--verbose',      required=False, default=True, type=bool)
     parser.add_argument('-o', '--output',       type=str, required=True,  help='Directory to save checkpoints')
     parser.add_argument('-d', '--dataset-path', type=str, default='./',  help='Path to dataset')
     parser.add_argument('--log-file',           type=str, default=None,  help='Path to a DLLogger log file')
@@ -61,9 +64,9 @@ def parse_args(parser):
     optimization.add_argument('--dur-predictor-loss-scale',   type=float,  default=1.0,      help='Rescale duration predictor loss')
     optimization.add_argument('--pitch-predictor-loss-scale', type=float,  default=1.0,      help='Rescale pitch predictor loss')
 
-    dataset = parser.add_argument_group('dataset parameters')
-    dataset.add_argument('--training-files', type=str, required=True,  help='Path to training filelist')
-    dataset.add_argument('--validation-files', type=str, required=True,  help='Path to validation filelist')
+    #dataset = parser.add_argument_group('dataset parameters')
+    #dataset.add_argument('--training-files', type=str, required=True,  help='Path to training filelist')
+    #dataset.add_argument('--validation-files', type=str, required=True,  help='Path to validation filelist')
 
     distributed = parser.add_argument_group('distributed setup')
     distributed.add_argument('--local_rank', type=int,    default=os.getenv('LOCAL_RANK', 0),    help='Rank of the process for multiproc. Do not set manually.')
@@ -209,26 +212,43 @@ def apply_ema_decay(model, ema_model, decay):
      
 
 def run(config, args):
-    # initiate
-    show_message('Initializing logger...', verbose=args.verbose)
-    logger = Logger(config)
     
-    show_message('Initializing model...', verbose=args.verbose)
+    if 'LOCAL_RANK' in os.environ and 'WORLD_SIZE' in os.environ:
+        local_rank = int(os.environ['LOCAL_RANK'])
+        world_size = int(os.environ['WORLD_SIZE'])
+    else:
+        local_rank = args.rank
+        world_size = args.world_size
+    distributed_run = world_size > 1
 
+    torch.manual_seed(args.seed + local_rank)
+    np.random.seed(args.seed + local_rank)
+
+    if local_rank == 0:
+        if not os.path.exists(args.output):
+            os.makedirs(args.output)
+ 
+    torch.backends.cudnn.enabled = True
+    torch.backends.cudnn.benchmark = False
     
-    # config distribute
-
+    
+    if local_rank == 0:
+        print("start training")
+        print("args", args)
+        print("config", config)
 
     
     #############################################
-    
     # model
+    if local_rank == 0:
+        print("load model")
     model = WaveGrad(config).cuda()
-    show_message(f'Number of parameters: {model.nparams}', verbose=args.verbose)    
+    if local_rank == 0:
+        print(model) 
     
     # optimizer amp config
-    
-    show_message('Initializing optimizer, scheduler and losses...', verbose=args.verbose)
+    if local_rank == 0:    
+        print("configure optimizer and amp")    
     kw = dict(lr=args.learning_rate, betas=(0.9, 0.98), eps=1e-9,
               weight_decay=args.weight_decay)
     
@@ -242,21 +262,18 @@ def run(config, args):
     if args.amp:
         model, optimizer = amp.initialize(model, optimizer, opt_level="O1")
 
-    if args.ema_decay > 0:
-        ema_model = copy.deepcopy(model)
-    else:
-        ema_model = None
 
     if distributed_run:
         model = DistributedDataParallel(model, device_ids=[args.local_rank],
                                         output_device=args.local_rank,
                                         find_unused_parameters=True)
-
     start_epoch = [1]
     start_iter  = [0]
     
     ################
-    load checkpoint 
+    #load checkpoint 
+    if local_rank == 0:
+        print("checkpoint load if needed")
     
     assert args.checkpoint_path is None or args.resume is False, (
         "Specify a single checkpoint source")
@@ -278,10 +295,9 @@ def run(config, args):
     
     
     # dataloader
-    
     ##########################################################    
-    show_message('Initializing data loaders...', verbose=args.verbose)
-    
+    if local_rank == 0:    
+        print("load dataset") 
     train_dataset = AudioDataset(config, training=True)
    
     # distributed sampler 
@@ -301,7 +317,9 @@ def run(config, args):
         config.training_config.n_samples_to_test
     )
     
-    # Log ground truth test batch    
+    # Log ground truth test batch  
+    if local_rank == 0:    
+        print("save truth wave and mel")
     mel_fn = MelSpectrogramFixed(
         sample_rate=config.data_config.sample_rate,
         n_fft=config.data_config.n_fft,
@@ -317,12 +335,10 @@ def run(config, args):
         f'audio_{index}/gt': audio
         for index, audio in enumerate(test_batch)
     }
-    logger.log_audios(0, audios)
     specs = {
         f'mel_{index}/gt': mel_fn(audio.cuda()).cpu().squeeze()
         for index, audio in enumerate(test_batch)
     }
-    logger.log_specs(0, specs)
     
    
     
@@ -336,8 +352,10 @@ def run(config, args):
     val_loss = 0.0
     torch.cuda.synchronize()    
     
+    if local_rank == 0:
+        print("epoch start")
     for epoch in range(start_epoch, args.epochs + 1):
-        epoch_start_time = time.time()
+        tic_epoch= time.time()
         epoch_loss = 0.0
         
         if distributed_run:
@@ -346,6 +364,7 @@ def run(config, args):
         accumulated_steps = 0
         iter_loss = 0    
         epoch_iter = 0
+        iteration = 0
         num_iters = len(train_loader) // args.gradient_accumulation_steps
         
         model.set_new_noise_schedule(
@@ -358,7 +377,8 @@ def run(config, args):
         )
 
         
-        for batch in train_loader:
+        for i,batch in enumerate(train_loader):
+            tic_iter = time.time()
             
             model.zero_grad()                
             batch = batch.cuda()
@@ -392,8 +412,8 @@ def run(config, args):
 
             optimizer.step()
 
-            iter_stop_time = time.time()
-            iter_time = iter_stop_time - iter_start_time
+            toc_iter = time.time()
+            dur_iter = toc_iter - tic_iter
             epoch_loss += iter_loss
             iter_loss = 0
                 
@@ -401,12 +421,16 @@ def run(config, args):
                 'iter_loss': iter_loss.item(),
                 'grad_norm': grad_norm.item()
             }
-            logger.log_training(iteration, loss_stats, verbose=args.verbose)
-
+            if local_rank == 0:
+                print("\nepoch {:4d} | iter {:>12d}  {:>3d}/{:3d} | {:3.2f}s/iter est {:d}s/epoch | losses {:>12.6f} {:>12.6f} ".format(
+                        epoch, iteration, i, iter_size, dur_iter, epoch_iter, iter_loss.item(), grad_norm.item()  ) ,end='' )
             iteration += 1
         # Finished epoch
-        epoch_stop_time = time.time()
-        epoch_time = epoch_stop_time - epoch_start_time
+        toc_epoch = time.time()
+        dur_epoch = toc_epoch - tic_epoch
+        if local_rank == 0:
+            print("  {:4.2f}s/epoch  ".format(iter_size, dur_epoch  )  )        
+        
         
         # Test step
         if epoch % config.training_config.test_interval == 0:
@@ -416,20 +440,22 @@ def run(config, args):
                     'steps': config.training_config.test_noise_schedule.n_iter,
                     'start': config.training_config.test_noise_schedule.betas_range[0],
                     'end': config.training_config.test_noise_schedule.betas_range[1]
-                }
+                } )
                     
                     
 
     
     
         #save checkpoint 
-        if (epoch > 0 and args.epochs_per_checkpoint > 0 and
+        if (epoch > 0 and args.epochs_per_checkpoint > 0 and 
             (epoch % args.epochs_per_checkpoint == 0) and local_rank == 0):
 
             checkpoint_path = os.path.join(
                 args.output, f"FastPitch_checkpoint_{epoch}.pt")
             save_checkpoint(local_rank, model, ema_model, optimizer, epoch,
                             total_iter, model_config, args.amp, checkpoint_path)
+            if local_rank == 0:
+                print("checkpoint saved")
         
     
 if __name__ == '__main__':
@@ -443,23 +469,7 @@ if __name__ == '__main__':
     with open(args.config) as f:
         config = ConfigWrapper(**json.load(f))
                 
-    if 'LOCAL_RANK' in os.environ and 'WORLD_SIZE' in os.environ:
-        local_rank = int(os.environ['LOCAL_RANK'])
-        world_size = int(os.environ['WORLD_SIZE'])
-    else:
-        local_rank = args.rank
-        world_size = args.world_size
-    distributed_run = world_size > 1
 
-    torch.manual_seed(args.seed + local_rank)
-    np.random.seed(args.seed + local_rank)
-
-    if local_rank == 0:
-        if not os.path.exists(args.output):
-            os.makedirs(args.output)
- 
-    torch.backends.cudnn.enabled = True
-    torch.backends.cudnn.benchmark = False
     
     
     run(config, args)
