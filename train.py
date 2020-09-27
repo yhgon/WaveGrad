@@ -369,6 +369,8 @@ def run(config, args):
     
     if local_rank == 0:
         print("epoch start")
+      
+    iteration = 0      
     for epoch in range(start_epoch, args.epochs + 1):
         tic_epoch= time.time()
         epoch_loss = 0.0
@@ -379,7 +381,7 @@ def run(config, args):
         accumulated_steps = 0
         iter_loss = 0    
         epoch_iter = 0
-        iteration = 0
+
         num_iters = len(train_loader) // args.gradient_accumulation_steps
         
         my_schedule(
@@ -400,7 +402,6 @@ def run(config, args):
             mels = mel_fn(batch)           
             
             # Training step
-            model.zero_grad()
             loss = compute_loss(mels, batch)
             
             if args.amp:
