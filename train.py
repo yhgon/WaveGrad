@@ -355,11 +355,6 @@ def run(config, args):
         for index, audio in enumerate(test_batch)
     }
     
-   
-    
-    
-
-    
     ####### loop start
     #epoch
     
