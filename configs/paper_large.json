@@ -20,7 +20,7 @@
         "sample_rate": 24000,
         "n_fft": 2048,
         "win_length": 1200,
-        "windows": 'hanning',
+        "windows": "hanning",
         "hop_length": 300,
         "f_min": 20,
         "f_max": 12000,
