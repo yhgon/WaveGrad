@@ -1,10 +1,13 @@
 import argparse
 import json
+import os
+import sys 
 
 import torch
 from tqdm import tqdm
 
 import utils
+from utils import ConfigWrapper 
 import benchmark
 from model import WaveGrad
 from data import AudioDataset, MelSpectrogramFixed
@@ -31,13 +34,15 @@ def load_checkpoint_org( model, filepath,):
 
 
 def run(config, args):
-  print(config)
-  model = WaveGrad(config).cuda()
-  print(f'Number of parameters: {model.nparams}'
-  load_checkpoint_org(model,config.schedule_checkpoint)
+    print(config)
+    model = WaveGrad(config).cuda()
+    print(f'Number of parameters: {model.nparams}')
+
+    schedule_checkpoint=os.path.join(config.training_config.logdir, "checkpoint_{}.pt".format(args.checkpointnum) )
+    load_checkpoint_org(model,schedule_checkpoint)
   
-  dataset = AudioDataset(config, training=False)
-  mel_fn = MelSpectrogramFixed(
+    dataset = AudioDataset(config, training=False)
+    mel_fn = MelSpectrogramFixed(
       sample_rate=config.data_config.sample_rate,
       n_fft=config.data_config.n_fft,
       win_length=config.data_config.win_length,
@@ -46,25 +51,26 @@ def run(config, args):
       f_max=config.data_config.f_max,
       n_mels=config.data_config.n_mels,
       window_fn=torch.hann_window
-  ).cuda()
+      ).cuda()
 
-  iters_best_schedule, stats = benchmark.iters_schedule_grid_search(
-      model=model, n_iter=6, config=config, step=1, test_batch_size=2,
-      path_to_store_stats='schedules/gs_stats_{:d}iters.pt'.format(config.schedule_batch),
-      verbose=config.verbose
-  )
-  print(config.schedule_batch)
-  print(iters_best_schedule) 
-  torch.save(iters_best_schedule, 'schedules/iters{:d}_best_schedule.pt'.format(config.schedule_batch) )
+    iters_best_schedule, stats = benchmark.iters_schedule_grid_search(
+        model=model, n_iter=args.iter, config=config, step=1, test_batch_size=args.schedulebatch,
+        path_to_store_stats='{}/gs_stats_{:d}iters.pt'.format(args.scheduledir,args.iter),
+        verbose=args.verbose
+      )
+    print(config.schedule_batch)
+    print(iters_best_schedule) 
+    torch.save(iters_best_schedule, '{}/iters{:d}_best_schedule.pt'.format(args,scheduledir, args.iter) )
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-c', '--config', required=True, type=str)
     parser.add_argument('-i', '--iter',   required=True, type=int)    
-    parser.add_argument('-b', '--schedule-batch',  required=True, type=int)   
-    parser.add_argument('-f', '--schedule-checkpoint',  required=True, type=str)
+    parser.add_argument('-b', '--schedulebatch',  required=True, type=int)   
+    parser.add_argument('-n', '--checkpointnum',  required=True, type=int)
     parser.add_argument('-v', '--verbose', required=False, default=True, type=bool)
+    parser.add_argument('-s', '--scheduledir', required=True, type=str)
     args = parser.parse_args()
 
     with open(args.config) as f:
