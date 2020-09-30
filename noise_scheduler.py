@@ -31,8 +31,6 @@ def load_checkpoint_org( model, filepath,):
     }
     model.load_state_dict(checkpoint['model'], strict=False)
 
-
-
 def run(config, args):
     print(config)
     model = WaveGrad(config).cuda()
@@ -54,14 +52,14 @@ def run(config, args):
       ).cuda()
 
     iters_best_schedule, stats = benchmark.iters_schedule_grid_search(
-        model=model, n_iter=args.iter, config=config, step=1, test_batch_size=args.schedulebatch,
-        path_to_store_stats='{}/gs_stats_{:d}iters.pt'.format(args.scheduledir,args.iter),
+        model=model, n_iter=args.iter, config=config, step=args.step, test_batch_size=args.schedulebatch,
+        path_to_store_stats='{}/gs_stats_{:d}iters.pt'.format(args.scheduledir, args.iter),
         verbose=args.verbose
       )
-    print(config.schedule_batch)
+    torch.save(iters_best_schedule, '{}/iters{:d}_best_schedule.pt'.format(args.scheduledir, args.iter) )
+    
+    print(args.iter)
     print(iters_best_schedule) 
-    torch.save(iters_best_schedule, '{}/iters{:d}_best_schedule.pt'.format(args,scheduledir, args.iter) )
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -70,7 +68,8 @@ if __name__ == '__main__':
     parser.add_argument('-b', '--schedulebatch',  required=True, type=int)   
     parser.add_argument('-n', '--checkpointnum',  required=True, type=int)
     parser.add_argument('-v', '--verbose', required=False, default=True, type=bool)
-    parser.add_argument('-s', '--scheduledir', required=True, type=str)
+    parser.add_argument('-d', '--scheduledir', required=True, type=str)
+    parser.add_argument('-s', '--step', default=10, type=int)    
     args = parser.parse_args()
 
     with open(args.config) as f:
