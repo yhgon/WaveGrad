@@ -51,7 +51,7 @@ def run(config, args):
   iters_best_schedule, stats = benchmark.iters_schedule_grid_search(
       model=model, n_iter=6, config=config, step=1, test_batch_size=2,
       path_to_store_stats='schedules/gs_stats_{:d}iters.pt'.format(config.schedule_batch),
-      verbose=True
+      verbose=config.verbose
   )
   print(config.schedule_batch)
   print(iters_best_schedule) 
