@@ -17,7 +17,7 @@
         ]
     },
     "data_config": {
-        "sample_rate": 24000,
+        "sample_rate": 22050,
         "n_fft": 1200,
         "win_length": 1200,
         "hop_length": 300,
